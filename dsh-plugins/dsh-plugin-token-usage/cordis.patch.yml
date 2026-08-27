@@ -1,0 +1,5 @@
+# Bundle layer for dsh-plugin-token-usage.
+# Applied when a profile lists this package in its `dsh.profile.bundles`.
+- insert:
+    - id: plugin-token-usage
+      name: dsh-plugin-token-usage
