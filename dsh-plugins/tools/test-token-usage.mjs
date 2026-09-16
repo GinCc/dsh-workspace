@@ -50,10 +50,15 @@ const ctx = {
     },
   },
   sessionPersistence: {
-    listSnapshots: async () => sessions.map((s) => ({ header: s.header, revision: s.revision })),
-    readFrom: async (id) => {
+    list: async () => sessions.map((s) => ({ header: s.header, revision: s.revision })),
+    open: async (id, access) => {
+      assert.equal(access, 'read', 'stats must open read handles only')
       readCalls += 1
-      return { events: sessions.find((s) => s.header.id === id).events }
+      const stored = sessions.find((s) => s.header.id === id)
+      return {
+        read: async () => ({ events: stored.events }),
+        close: async () => {},
+      }
     },
   },
   effect: (fn) => {
@@ -62,7 +67,7 @@ const ctx = {
   },
 }
 
-apply(ctx)
+await apply(ctx)
 assert.ok(route !== undefined, 'route registered')
 assert.equal(route.path, '/plugins/token-usage')
 

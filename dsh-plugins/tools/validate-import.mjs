@@ -77,9 +77,16 @@ function validateCase(label, text, checks) {
 
   // The real acceptance gate: restore through the production validator.
   // (The constructor appends one `session/end-seed` marker after the seed.)
-  const header = { version: SESSION_FORMAT_VERSION, id: SessionId(crypto.randomUUID()), createdAt: built.createdAt }
-  const session = Session.fromRestore(header.id, structuredClone(built.events), header)
-  assert(session.events.length === built.events.length + 1, `Session.fromRestore accepted all ${built.events.length} events (+seed marker)`)
+  const header = {
+    version: SESSION_FORMAT_VERSION,
+    id: SessionId(crypto.randomUUID()),
+    createdAt: built.createdAt,
+    isSeeded: false,
+  }
+  const session = Session.fromRestore(
+    header.id, structuredClone(built.events), header, 0, 'detached')
+  assert(session.snapshotEvents().length === built.events.length + 1,
+    `Session.fromRestore accepted all ${built.events.length} events (+seed marker)`)
   return { conversation, built, session }
 }
 
@@ -129,7 +136,7 @@ const openai = validateCase('openai', openaiText, (conversation, built) => {
 /* surface derivation sanity: the ordered surface should carry our messages */
 const surface = openai.session
 console.log('\nsurface check')
-assert(openai.session.events.filter((event) => event.type === 'user/message').length === 2, 'surface holds both user messages')
-assert(openai.session.events.filter((event) => event.type === 'assistant/message').length === 2, 'surface holds both assistant messages')
+assert(openai.session.snapshotEvents().filter((event) => event.type === 'user/message').length === 2, 'surface holds both user messages')
+assert(openai.session.snapshotEvents().filter((event) => event.type === 'assistant/message').length === 2, 'surface holds both assistant messages')
 
 console.log('\nALL CHECKS PASSED')

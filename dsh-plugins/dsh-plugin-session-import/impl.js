@@ -31,6 +31,13 @@ const PREVIEW_READ_BYTES = 20 * 1024 * 1024
 const MAX_FILES_PER_AGENT = 400
 const MAX_DISCOVER_RESULTS = 400
 
+/**
+ * On-disk session format version stamped into imported headers. Mirrors
+ * SESSION_FORMAT_VERSION from @deepseek-ai/dsh-session (kept literal so this
+ * plugin stays dependency-free; a mismatch fails loudly at create()).
+ */
+const SESSION_FORMAT_VERSION = 3
+
 /* -------------------------------------------------------------------------- */
 /* utterance + turn model                                                      */
 
@@ -83,6 +90,25 @@ function firstSentenceTitle(text, maxChars = 40, maxCharsBytes = 120) {
     if (withEllipsis.length <= maxChars && bytes(withEllipsis) <= maxCharsBytes) candidate = withEllipsis
   }
   return candidate
+}
+
+/**
+ * Compact stream records for an imported assistant message: one packed run
+ * per content block (text or reasoning), matching AssistantStreamRecord —
+ * the lossless form dsh embeds in assistant/message events.
+ */
+function streamRecordsFor(blocks, time) {
+  const records = []
+  let index = 0
+  for (const block of blocks) {
+    if (block.type === 'text') {
+      records.push({ type: 'text-chunks', time0: time, index, dt: [0], texts: [block.text] })
+    } else if (block.type === 'reasoning') {
+      records.push({ type: 'reasoning-chunks', time0: time, index, dt: [0], texts: [block.text] })
+    }
+    index += 1
+  }
+  return records
 }
 
 function titleOf(turns) {
@@ -467,6 +493,7 @@ function buildEvents(conversation) {
             model: assistant.model?.model ?? 'unknown',
           },
         },
+        stream: streamRecordsFor(assistant.blocks, stepTime),
         ...(assistant.usage !== undefined ? { usage: assistant.usage } : {}),
       }, stepTime, { surfaceOp: 'append' })
       push('step/end', { turn: turnNumber, step: stepNumber }, stepTime)
@@ -831,23 +858,36 @@ export function apply(ctx) {
     const built = buildEvents(conversation)
     const sessionId = crypto.randomUUID()
     const meta = {
-      version: 0,
+      version: SESSION_FORMAT_VERSION,
       id: sessionId,
       createdAt: built.createdAt,
+      isSeeded: false,
       ...(conversation.cwd !== undefined ? { cwd: conversation.cwd } : {}),
     }
-    await ctx.sessionPersistence.create(meta)
-    await ctx.sessionPersistence.append(sessionId, built.events)
+    // Handle-based write path (dsh >= 0.1.6): create() takes single-writer
+    // ownership, so the handle MUST be closed afterwards — otherwise a later
+    // resume (open 'write') would reject with SessionAlreadyOwnedError.
+    const writer = await ctx.sessionPersistence.create(meta)
+    try {
+      await writer.append(built.events)
+      await writer.flush()
+    } finally {
+      await writer.close()
+    }
     const workspace = await attachToWorkspace(sessionId, conversation.cwd)
-    // Read the session back through the same cold-inspection path a resume
-    // uses — proof at import time that the log loads cleanly for continuing.
+    // Read the session back through a read handle — the same cold read path a
+    // resume uses; proof at import time that the log loads for continuing.
     let verified = false
     try {
-      const view = await ctx.sessionPersistence.inspect(sessionId)
-      verified = view.events.length === built.events.length
+      const reader = await ctx.sessionPersistence.open(sessionId, 'read')
+      try {
+        verified = (await reader.read()).events.length === built.events.length
+      } finally {
+        await reader.close().catch(() => {})
+      }
     } catch (error) {
       ctx.logger?.('session-import')?.warn(
-        `imported session ${sessionId} failed cold inspection: ${String(error)}`)
+        `imported session ${sessionId} failed cold read-back: ${String(error)}`)
     }
     return { sessionId, built, title: titleOf(conversation.turns) ?? name, workspace, verified }
   }
@@ -908,7 +948,7 @@ export function apply(ctx) {
         // the ledger; archived ones are kept so unarchiving restores the
         // "imported" badge on the next scan.
         const liveIds = new Set(
-          (await ctx.sessionPersistence.listSnapshots()).map(snap => String(snap.header.id)))
+          (await ctx.sessionPersistence.list()).map(snap => String(snap.header.id)))
         const archivedIds = readArchivedIds()
         let pruned = false
         for (const key of Object.keys(ledger)) {
